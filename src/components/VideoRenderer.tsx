@@ -234,11 +234,20 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
       setRenderProgress(Math.round(progress * 100));
     });
 
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/unithread';
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
+    try {
+      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+    } catch (error) {
+      console.error('Failed to load FFmpeg from unpkg, trying jsdelivr...', error);
+      const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+    }
 
     ffmpegRef.current = ffmpeg;
     return ffmpeg;
@@ -248,9 +257,13 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
     try {
       setRendering(true);
       setRenderProgress(0);
-      setRenderMessage('Initializing FFmpeg...');
+      setRenderMessage('Initializing FFmpeg (this may take 30-60 seconds)...');
 
       const ffmpeg = await loadFFmpeg();
+
+      if (!ffmpeg) {
+        throw new Error('Failed to initialize FFmpeg');
+      }
 
       setRenderMessage('Rendering frames...');
       const fps = project.fps;
@@ -362,12 +375,13 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
 
     } catch (error) {
       console.error('Export error:', error);
-      setRenderMessage('Export failed. Please try again.');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setRenderMessage(`Export failed: ${errorMessage}. Please refresh and try again.`);
       setTimeout(() => {
         setRendering(false);
         setRenderProgress(0);
         setRenderMessage('');
-      }, 3000);
+      }, 5000);
     }
   };
 
@@ -473,15 +487,30 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
               )}
 
               {!rendering && (
-                <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
-                  <div className="flex items-start gap-3">
-                    <CheckCircle2 className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                <div className="space-y-3">
+                  <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                      <div className="text-sm text-slate-300">
+                        <p className="font-medium mb-1">Full Offline Video Export</p>
+                        <p className="text-slate-400">
+                          Click "Export Video" to render your project into an MP4 video file with all effects,
+                          music, and voiceovers. Video processing happens entirely in your browser using FFmpeg WebAssembly.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-yellow-900/20 border border-yellow-500/30 rounded-lg p-4">
                     <div className="text-sm text-slate-300">
-                      <p className="font-medium mb-1">Full Offline Video Export</p>
-                      <p className="text-slate-400">
-                        Click "Export Video" to render your project into an MP4 video file with all effects,
-                        music, and voiceovers. Video processing happens entirely in your browser using FFmpeg WebAssembly.
-                      </p>
+                      <p className="font-medium mb-2">Important Notes:</p>
+                      <ul className="list-disc list-inside space-y-1 text-slate-400">
+                        <li>First export will download FFmpeg (~30MB) - takes 30-60 seconds</li>
+                        <li>Keep this browser tab open during rendering</li>
+                        <li>Don't refresh or close tab while rendering</li>
+                        <li>For best results, use Chrome or Edge browser</li>
+                        <li>Rendering time: ~2-5 minutes per minute of video</li>
+                      </ul>
                     </div>
                   </div>
                 </div>

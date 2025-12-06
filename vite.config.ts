@@ -14,9 +14,22 @@ export default defineConfig({
           next();
         });
       },
+      configurePreviewServer: (server) => {
+        server.middlewares.use((_req, res, next) => {
+          res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+          res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+          next();
+        });
+      },
     },
   ],
   optimizeDeps: {
     exclude: ['lucide-react', '@ffmpeg/ffmpeg', '@ffmpeg/util'],
+  },
+  server: {
+    headers: {
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Opener-Policy': 'same-origin',
+    },
   },
 });
