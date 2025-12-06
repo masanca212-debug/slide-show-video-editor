@@ -257,6 +257,39 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
     try {
       setRendering(true);
       setRenderProgress(0);
+
+      // Validate video length
+      const fps = project.fps;
+      const totalFrames = Math.ceil(totalDuration * fps);
+      const estimatedMinutes = Math.ceil(totalDuration / 60);
+
+      if (totalDuration > 180) {
+        const confirmExport = window.confirm(
+          `⚠️ WARNING: Your video is ${estimatedMinutes} minutes long (${totalFrames} frames).\n\n` +
+          `This will take a VERY long time (30-60 minutes) and may crash your browser.\n\n` +
+          `Recommendations:\n` +
+          `• Split into shorter videos (60-90 seconds each)\n` +
+          `• Lower FPS to 24 if currently 30 or 60\n` +
+          `• Lower resolution if using 1080p or higher\n\n` +
+          `Do you want to continue anyway?`
+        );
+        if (!confirmExport) {
+          setRendering(false);
+          return;
+        }
+      } else if (totalDuration > 90) {
+        const confirmExport = window.confirm(
+          `⚠️ Your video is ${estimatedMinutes} minutes long.\n\n` +
+          `This will take 10-20 minutes to render.\n` +
+          `Keep this tab open and don't close your browser.\n\n` +
+          `Continue?`
+        );
+        if (!confirmExport) {
+          setRendering(false);
+          return;
+        }
+      }
+
       setRenderMessage('Initializing FFmpeg (this may take 30-60 seconds)...');
 
       const ffmpeg = await loadFFmpeg();
@@ -266,9 +299,9 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
       }
 
       setRenderMessage('Rendering frames...');
-      const fps = project.fps;
-      const totalFrames = Math.ceil(totalDuration * fps);
-      const frames: Uint8Array[] = [];
+
+      // Memory optimization: process frames in batches
+      const BATCH_SIZE = 30; // Process 30 frames at a time
 
       for (let i = 0; i < totalFrames; i++) {
         const time = i / fps;
@@ -277,15 +310,22 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
         const canvas = canvasRef.current;
         if (!canvas) continue;
 
+        // Use JPEG for smaller file sizes (90% quality)
         const blob = await new Promise<Blob>((resolve) => {
-          canvas.toBlob((b) => resolve(b!), 'image/png');
+          canvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.90);
         });
 
-        frames.push(new Uint8Array(await blob.arrayBuffer()));
-        await ffmpeg.writeFile(`frame${i.toString().padStart(6, '0')}.png`, frames[i]);
+        const frameData = new Uint8Array(await blob.arrayBuffer());
+        await ffmpeg.writeFile(`frame${i.toString().padStart(6, '0')}.jpg`, frameData);
 
-        if (i % 10 === 0) {
-          setRenderProgress(Math.round((i / totalFrames) * 50));
+        // Update progress
+        const progress = Math.round((i / totalFrames) * 50);
+        setRenderProgress(progress);
+        setRenderMessage(`Rendering frames... ${i + 1}/${totalFrames}`);
+
+        // Force garbage collection every batch
+        if (i % BATCH_SIZE === 0 && i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 10));
         }
       }
 
@@ -317,10 +357,11 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
       }
 
       setRenderMessage('Encoding video...');
+      setRenderProgress(60);
 
       const ffmpegArgs = [
         '-framerate', fps.toString(),
-        '-i', 'frame%06d.png',
+        '-i', 'frame%06d.jpg',
       ];
 
       if (hasAudio && audioInputs.length > 0) {
@@ -343,9 +384,10 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
 
       ffmpegArgs.push(
         '-c:v', 'libx264',
-        '-preset', 'medium',
-        '-crf', '23',
+        '-preset', 'veryfast',
+        '-crf', '26',
         '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
         '-t', totalDuration.toFixed(2),
         'output.mp4'
       );
@@ -511,6 +553,30 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
                         <li>For best results, use Chrome or Edge browser</li>
                         <li>Rendering time: ~2-5 minutes per minute of video</li>
                       </ul>
+                    </div>
+                  </div>
+
+                  <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-4">
+                    <div className="text-sm text-slate-300">
+                      <p className="font-medium mb-2">Tips for Faster Export:</p>
+                      <ul className="list-disc list-inside space-y-1 text-slate-400">
+                        <li><strong>Video Duration:</strong> 30-90 seconds recommended (2-3 min max)</li>
+                        <li><strong>Resolution:</strong> Use 720p for faster rendering</li>
+                        <li><strong>FPS:</strong> 24 fps fastest, 30 fps balanced, 60 fps slowest</li>
+                        <li><strong>Memory:</strong> Close other tabs and apps</li>
+                        <li><strong>Long Videos:</strong> Split into multiple shorter projects</li>
+                      </ul>
+                      <div className="mt-2 pt-2 border-t border-green-500/20">
+                        <p className="text-slate-400">
+                          Current video: <strong className="text-green-400">{Math.round(totalDuration)}s</strong>
+                          {totalDuration > 120 && (
+                            <span className="text-yellow-400"> ⚠️ Warning: Long video, may take 20+ minutes</span>
+                          )}
+                          {totalDuration <= 90 && (
+                            <span className="text-green-400"> ✓ Good duration for export</span>
+                          )}
+                        </p>
+                      </div>
                     </div>
                   </div>
                 </div>
