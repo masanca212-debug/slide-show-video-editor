@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { createObjectURL } from '../lib/storage';
-import { Download, Play, Pause, CheckCircle2, Loader2 } from 'lucide-react';
+import { Download, Play, Pause, CheckCircle2, Loader2, Film } from 'lucide-react';
+import { FFmpeg } from '@ffmpeg/ffmpeg';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
 interface Project {
   id: string;
@@ -82,8 +84,12 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
   const [currentTime, setCurrentTime] = useState(0);
   const [loadedImages, setLoadedImages] = useState<LoadedImage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rendering, setRendering] = useState(false);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderMessage, setRenderMessage] = useState('');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
+  const ffmpegRef = useRef<FFmpeg | null>(null);
 
   const width = project.width;
   const height = project.height;
@@ -215,41 +221,154 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
     ctx.restore();
   };
 
-  const exportToJSON = () => {
-    const exportData = {
-      project: {
-        id: project.id,
-        title: project.title,
-        width: project.width,
-        height: project.height,
-        fps: project.fps,
-      },
-      images: images.map(img => ({
-        fileName: img.file_name,
-        duration: img.duration,
-        effects: img.effects,
-        layer: img.layer,
-      })),
-      music: music.map(m => ({
-        fileName: m.file_name,
-        volume: m.volume,
-        duration: m.duration,
-      })),
-      voiceovers: voiceovers.map(v => ({
-        fileName: v.file_name,
-        startTime: v.start_time,
-        volume: v.volume,
-      })),
-      totalDuration,
-    };
+  const loadFFmpeg = async () => {
+    if (ffmpegRef.current) return ffmpegRef.current;
 
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${project.title}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const ffmpeg = new FFmpeg();
+
+    ffmpeg.on('log', ({ message }) => {
+      console.log(message);
+    });
+
+    ffmpeg.on('progress', ({ progress }) => {
+      setRenderProgress(Math.round(progress * 100));
+    });
+
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/unithread';
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+
+    ffmpegRef.current = ffmpeg;
+    return ffmpeg;
+  };
+
+  const exportVideo = async () => {
+    try {
+      setRendering(true);
+      setRenderProgress(0);
+      setRenderMessage('Initializing FFmpeg...');
+
+      const ffmpeg = await loadFFmpeg();
+
+      setRenderMessage('Rendering frames...');
+      const fps = project.fps;
+      const totalFrames = Math.ceil(totalDuration * fps);
+      const frames: Uint8Array[] = [];
+
+      for (let i = 0; i < totalFrames; i++) {
+        const time = i / fps;
+        renderFrame(time);
+
+        const canvas = canvasRef.current;
+        if (!canvas) continue;
+
+        const blob = await new Promise<Blob>((resolve) => {
+          canvas.toBlob((b) => resolve(b!), 'image/png');
+        });
+
+        frames.push(new Uint8Array(await blob.arrayBuffer()));
+        await ffmpeg.writeFile(`frame${i.toString().padStart(6, '0')}.png`, frames[i]);
+
+        if (i % 10 === 0) {
+          setRenderProgress(Math.round((i / totalFrames) * 50));
+        }
+      }
+
+      setRenderMessage('Processing audio...');
+
+      let hasAudio = false;
+      const audioInputs: string[] = [];
+      const filterComplex: string[] = [];
+      let audioIndex = 0;
+
+      if (music.length > 0) {
+        for (const m of music) {
+          const musicData = new Uint8Array(m.file_data);
+          await ffmpeg.writeFile(`music${audioIndex}.mp3`, musicData);
+          audioInputs.push(`-i music${audioIndex}.mp3`);
+          audioIndex++;
+          hasAudio = true;
+        }
+      }
+
+      if (voiceovers.length > 0) {
+        for (const v of voiceovers) {
+          const voiceData = new Uint8Array(v.file_data);
+          await ffmpeg.writeFile(`voice${audioIndex}.mp3`, voiceData);
+          audioInputs.push(`-i voice${audioIndex}.mp3`);
+          audioIndex++;
+          hasAudio = true;
+        }
+      }
+
+      setRenderMessage('Encoding video...');
+
+      const ffmpegArgs = [
+        '-framerate', fps.toString(),
+        '-i', 'frame%06d.png',
+      ];
+
+      if (hasAudio && audioInputs.length > 0) {
+        for (let i = 0; i < audioIndex; i++) {
+          ffmpegArgs.push('-i', i < music.length ? `music${i}.mp3` : `voice${i - music.length}.mp3`);
+        }
+
+        if (audioIndex > 1) {
+          const amixInputs = Array.from({ length: audioIndex }, (_, i) => `[${i + 1}:a]`).join('');
+          ffmpegArgs.push(
+            '-filter_complex',
+            `${amixInputs}amix=inputs=${audioIndex}:duration=first:dropout_transition=2[aout]`,
+            '-map', '0:v',
+            '-map', '[aout]'
+          );
+        } else {
+          ffmpegArgs.push('-map', '0:v', '-map', '1:a');
+        }
+      }
+
+      ffmpegArgs.push(
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-t', totalDuration.toFixed(2),
+        'output.mp4'
+      );
+
+      await ffmpeg.exec(ffmpegArgs);
+
+      setRenderMessage('Downloading video...');
+      const data = await ffmpeg.readFile('output.mp4');
+      const blob = new Blob([data], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${project.title}.mp4`;
+      a.click();
+
+      URL.revokeObjectURL(url);
+
+      setRenderMessage('Video exported successfully!');
+      setRenderProgress(100);
+
+      setTimeout(() => {
+        setRendering(false);
+        setRenderProgress(0);
+        setRenderMessage('');
+      }, 2000);
+
+    } catch (error) {
+      console.error('Export error:', error);
+      setRenderMessage('Export failed. Please try again.');
+      setTimeout(() => {
+        setRendering(false);
+        setRenderProgress(0);
+        setRenderMessage('');
+      }, 3000);
+    }
   };
 
   const togglePlayback = () => {
@@ -315,26 +434,58 @@ export function VideoRenderer({ project, images, music, voiceovers, onClose }: V
                 </div>
 
                 <button
-                  onClick={exportToJSON}
-                  className="flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                  onClick={exportVideo}
+                  disabled={rendering}
+                  className="flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
                 >
-                  <Download className="w-5 h-5" />
-                  <span>Export JSON</span>
+                  {rendering ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span>Rendering...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Film className="w-5 h-5" />
+                      <span>Export Video</span>
+                    </>
+                  )}
                 </button>
               </div>
 
-              <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
-                <div className="flex items-start gap-3">
-                  <CheckCircle2 className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
-                  <div className="text-sm text-slate-300">
-                    <p className="font-medium mb-1">Offline Mode</p>
-                    <p className="text-slate-400">
-                      Preview shows slideshow animation. Export project as JSON to save configuration.
-                      Full video rendering requires online services or desktop software.
+              {rendering && (
+                <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-300 font-medium">{renderMessage}</span>
+                      <span className="text-green-400 font-bold">{renderProgress}%</span>
+                    </div>
+                    <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                      <div
+                        className="bg-gradient-to-r from-green-500 to-green-400 h-full transition-all duration-300"
+                        style={{ width: `${renderProgress}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Please wait, this may take a few minutes depending on video length...
                     </p>
                   </div>
                 </div>
-              </div>
+              )}
+
+              {!rendering && (
+                <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
+                  <div className="flex items-start gap-3">
+                    <CheckCircle2 className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                    <div className="text-sm text-slate-300">
+                      <p className="font-medium mb-1">Full Offline Video Export</p>
+                      <p className="text-slate-400">
+                        Click "Export Video" to render your project into an MP4 video file with all effects,
+                        music, and voiceovers. Video processing happens entirely in your browser using FFmpeg WebAssembly.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </>
         )}
